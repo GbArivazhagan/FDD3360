@@ -1,0 +1,27 @@
+module print_fn
+contains
+attributes(global) subroutine hello_gpu()
+  implicit none
+  print *, "Hello World! My threadId is ",threadIdx%x
+end subroutine hello_gpu
+
+subroutine hellocpu()
+  print *, "Hello from CPU!"
+end subroutine hellocpu
+end module print_fn
+
+program gpu_assignment2_1
+use print_fn
+use cudafor
+
+implicit none
+type(dim3) :: grid,block
+
+grid = dim3(1,1,1)
+block = dim3(256,1,1)
+
+call hellocpu
+call hello_gpu<<<grid,block>>>()
+
+! call cudaDeviceSynchronize
+end program gpu_assignment2_1
