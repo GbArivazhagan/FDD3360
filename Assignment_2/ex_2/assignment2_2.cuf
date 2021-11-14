@@ -1,0 +1,92 @@
+module saxpy
+contains
+
+subroutine cpu_saxpy(n, a, x, y)
+    implicit none
+    integer, intent(in) :: n
+    real, intent(in)    :: a
+    real, intent(in)    :: x(:)
+    real, intent(inout) :: y(:)
+    integer             :: i
+
+    y = a * x + y
+end subroutine cpu_saxpy
+
+attributes(global) subroutine gpu_saxpy(n, a, x, y)
+    implicit none
+    integer, intent(in), value :: n
+    real, intent(in), dimension(n) :: x
+    real, intent(inout), dimension(n) :: y
+    real, intent(in), value :: a
+    integer, value :: i
+
+    i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    if (i<=n) then
+      y(i) = a * x(i) + y(i)
+    end if
+end subroutine gpu_saxpy
+
+end module saxpy
+
+program assignment2_2
+    use saxpy
+    use cudafor
+    implicit none
+    type(dim3)                :: grid, block
+    real                      :: start, finish
+    integer, parameter        :: BLOCK_SIZE = 256
+    integer, parameter        :: ARRAY_SIZE = 100000
+    real, parameter           :: a = 0.5
+    real, allocatable         :: x(:)
+    real, allocatable         :: y(:)
+    real, device, allocatable :: d_x(:)
+    real, device, allocatable :: d_y(:)
+    real, allocatable         :: y_gpu(:)
+    real                      :: mse
+    integer                   :: hr, istat
+
+    grid = dim3((ARRAY_SIZE+BLOCK_SIZE-1)/BLOCK_SIZE,1,1)
+    block = dim3(BLOCK_SIZE,1,1)
+
+    print *, "Grid size is: ",(ARRAY_SIZE+BLOCK_SIZE-1)/BLOCK_SIZE
+
+    allocate(x(ARRAY_SIZE))
+    allocate(y(ARRAY_SIZE))
+
+    x = 0.1
+    y = 0.2
+
+    istat = cudaMalloc(d_x, ARRAY_SIZE)
+    istat = cudaMalloc(d_y, ARRAY_SIZE)
+    allocate(y_gpu(ARRAY_SIZE))
+    
+    d_x = x
+    d_y = y
+
+    call cpu_time(start)
+    call cpu_saxpy(ARRAY_SIZE, a, x, y)
+    call cpu_time(finish)
+    print '("CPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    call cpu_time(start)
+    call gpu_saxpy<<<grid,block>>>(ARRAY_SIZE, a, d_x, d_y)
+    call cpu_time(finish)
+    print '("GPU Execution time = ",f9.6," seconds.")',finish-start
+
+    y_gpu = d_y
+
+    mse = sqrt(sum(abs(y - y_gpu))**2)
+
+    write (*,*) 'Execution finished mse=', mse
+
+    if (mse > 0.0001) then
+        write (*,*) 'Error: The solution is incorrect!'
+    end if
+
+    deallocate(x)
+    deallocate(y)
+
+    istat = cudaFree(d_x)
+    istat = cudaFree(d_y)
+    
+end program assignment2_2
