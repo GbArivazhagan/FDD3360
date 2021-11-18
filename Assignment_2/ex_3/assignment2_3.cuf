@@ -1,0 +1,230 @@
+module particle_def
+contains
+
+subroutine cpu_velocity_update(np, t, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, t
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, np
+      P(i)%velocity%u = 0.00001*t - 0.0005*P(i)%position%x
+      P(i)%velocity%v = 0.00001*t - 0.0002*P(i)%position%x*P(i)%position%y
+      P(i)%velocity%w = 0.00001*t - 0.0001*P(i)%position%x*P(i)%position%z
+    end do
+end subroutine cpu_velocity_update
+
+subroutine cpu_position_update(np, dt, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, dt
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, np
+      P(i)%position%x = P(i)%position%x + dt*P(i)%velocity%u
+      P(i)%position%y = P(i)%position%y + dt*P(i)%velocity%v
+      P(i)%position%z = P(i)%position%z + dt*P(i)%velocity%w
+    end do
+end subroutine cpu_position_update
+
+subroutine cpu_particle(np, nt, dt, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, nt, dt
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, nt
+        call cpu_velocity_update(np, i*dt, P)
+        call cpu_position_update(np, dt, P)
+    end do
+
+end subroutine cpu_particle
+
+attributes(device) subroutine gpu_velocity_update(np, t, X)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, t
+    type(Particle), intent(inout) :: X
+    
+    X%velocity%u = 0.00001*t - 0.0005*X%position%x
+    X%velocity%v = 0.00001*t - 0.0002*X%position%x*X%position%y
+    X%velocity%w = 0.00001*t - 0.0001*X%position%x*X%position%z
+    
+end subroutine gpu_velocity_update
+
+attributes(device) subroutine gpu_position_update(np, dt, X)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, dt
+    type(Particle), intent(inout) :: X
+    
+    X%position%x = X%position%x + dt*X%velocity%u
+    X%position%y = X%position%y + dt*X%velocity%v
+    X%position%z = X%position%z + dt*X%velocity%w
+
+end subroutine gpu_position_update
+
+attributes(global) subroutine gpu_particle(np, nt, dt, d_P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, nt, dt
+    type(Particle), intent(inout) :: d_P(:)
+    integer, value                :: i, j
+    
+    j = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    
+    if (j <= np) then
+        do i = 1, nt
+            call gpu_velocity_update(np, i*dt, d_P(j))
+            call gpu_position_update(np, dt, d_P(j))
+        end do
+    end if
+
+end subroutine gpu_particle
+
+end module particle_def
+
+program assignment2_3
+    use particle_def
+    use cudafor
+    implicit none
+    
+    type Position
+      real :: x, y, z
+    end type Position
+    
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+    
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    type(dim3)                          :: grid, block
+    real                                :: start, finish
+    integer                             :: i, t, dt
+    integer, parameter                  :: BLOCK_SIZE = 256
+    integer, parameter                  :: NUM_PARTICLES = 100000
+    integer, parameter                  :: NUM_ITERATIONS = 10000
+    type(Particle), allocatable         :: P(:)
+    type(Particle), device, allocatable :: d_P(:)
+    integer                             :: istat
+    type(Particle), allocatable         :: gpu_P(:)
+
+    grid = dim3((NUM_PARTICLES+BLOCK_SIZE-1)/BLOCK_SIZE,1,1)
+    block = dim3(BLOCK_SIZE,1,1)
+
+    print *, "Grid size is: ",(NUM_PARTICLES+BLOCK_SIZE-1)/BLOCK_SIZE
+    
+    t = 0
+    dt = 1
+
+    allocate(P(NUM_PARTICLES))
+
+    do i = 1, NUM_PARTICLES
+      P(i)%position%x = i*0.001
+      P(i)%position%y = (i**2 - 2*i)*0.001
+      P(i)%position%z = 0.00005*(i**2 + 3*i)
+    end do
+    
+    call cpu_time(start)
+    call cpu_particle(NUM_PARTICLES, NUM_ITERATIONS, dt, P)
+    call cpu_time(finish)
+    print '("CPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    allocate(d_P(NUM_PARTICLES))
+    allocate(gpu_P(NUM_PARTICLES))
+    
+    call cpu_time(start)
+    call gpu_particle<<<grid,block>>>(NUM_PARTICLES, NUM_ITERATIONS, dt, d_P)
+    call cpu_time(finish)
+    print '("GPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    gpu_P = d_P
+
+! Check result of a particle's position
+    print *, "CPU result: ", gpu_P(5)%position%x
+    print *, "GPU result: ", gpu_P(5)%position%x
+    
+    deallocate(P)
+    deallocate(d_P)
+    deallocate(gpu_P)
+        
+end program assignment2_3
