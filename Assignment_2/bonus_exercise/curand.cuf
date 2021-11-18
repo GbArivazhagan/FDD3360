@@ -1,0 +1,49 @@
+module curand
+    integer, parameter, public :: CURAND_RNG_PSEUDO_DEFAULT=100
+
+    interface curandCreateGenerator
+        !curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type)
+       subroutine curandCreateGenerator(generator,rng_type) &
+       bind(C,name='curandCreateGenerator')
+!dec$ attributes stdcall, decorate :: curandCreateGenerator
+          use iso_c_binding
+          integer(c_size_t)::generator
+          integer(c_int),value::rng_type
+       end subroutine
+    end interface
+
+    interface curandSetPseudoRandomGeneratorSeed
+       !curandSetPseudoRandomGeneratorSeed(curandGenerator_t generator, unsigned long long seed)
+       subroutine curandSetPseudoRandomGeneratorSeed(generator,seed) &
+       bind(C,name='curandSetPseudoRandomGeneratorSeed')
+!dec$ attributes stdcall, decorate :: curandSetPseudoRandomGeneratorSeed
+          use iso_c_binding
+          integer(c_size_t),value::generator
+          integer(c_long_long),value::seed
+       end subroutine
+    end interface
+
+    interface curandGenerateUniform
+       !curandGenerateUniform(curandGenerator_t generator, float *outputPtr, size_t num)
+       subroutine curandGenerateUniform(generator, odata, numele) &
+       bind(C,name='curandGenerateUniform')
+!dec$ attributes stdcall, decorate :: curandGenerateUniform
+          use iso_c_binding
+          integer(c_size_t),value::generator
+          !pgi$ ignore_tr odata
+          real(c_float),device::odata(*)
+          integer(c_size_t),value::numele
+       end subroutine
+    end interface
+
+    interface curandDestroyGenerator
+       !curandDestroyGenerator(curandGenerator_t generator)
+       subroutine curandDestroyGenerator(generator) &
+       bind(C,name='curandDestroyGenerator')
+!dec$ attributes stdcall, decorate :: curandDestroyGenerator
+          use iso_c_binding
+          integer(c_size_t),value::generator
+       end subroutine
+    end interface
+ end module
+

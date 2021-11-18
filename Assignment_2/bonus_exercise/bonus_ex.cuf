@@ -1,0 +1,111 @@
+module pi_calc
+contains
+
+subroutine cpu_pi(n_itr, rand, pi)
+    implicit none
+
+    integer(kind=8), intent(in)           :: n_itr
+    real, intent(in)                      :: rand(:)
+    real, allocatable                     :: rand_x(:), rand_y(:)
+    real, intent(out)                     :: pi
+    integer                               :: i, count
+    real                                  :: z
+    
+    count = 0
+    allocate(rand_x(n_itr),rand_y(n_itr))
+    rand_x = rand(1:n_itr)
+    rand_y = rand(n_itr+1:2*n_itr)
+    
+    do i = 1, n_itr
+      z = sqrt(rand_x(i)**2 + rand_y(i)**2)
+      if (z <= 1.0) then
+        count = count + 1
+      end if
+    end do
+    
+    pi = 4.0*real(count)/real(n_itr)
+    
+end subroutine cpu_pi
+
+attributes(global) subroutine gpu_pi(n_itr, rand, count_gpu, counts)
+    implicit none
+
+    integer(kind=8), intent(in), value    :: n_itr
+    real, intent(in)                      :: rand(:)
+    integer, intent(in), value            :: counts
+    real, intent(inout)                   :: count_gpu(:)
+    integer, value                        :: j, k
+    real, value                           :: z
+    
+    j = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    
+    if (j <= n_itr/counts) then
+      do k = 1, counts
+        z = sqrt(rand((j-1)*counts+k)**2 + rand(n_itr+(j-1)*counts+k)**2)
+        if (z <= 1.0) then
+          count_gpu((j-1)*counts+k) = 1
+        end if
+      end do
+    end if
+    
+end subroutine gpu_pi
+end module pi_calc
+
+program assignment2_bonus
+    use pi_calc
+    use cudafor
+    use curand
+    use iso_c_binding
+    implicit none
+    
+    type(dim3)                              :: grid, block
+    real                                    :: start, finish
+    integer, parameter                      :: BLOCK_SIZE = 256
+    integer(kind=8), parameter              :: NUM_ITER = 100000
+    integer(kind=8), parameter              :: SEED = 921
+    integer (c_size_t)                      :: gen
+    real, allocatable                       :: rando(:)
+    real, allocatable, device               :: d_rando(:)
+    real, allocatable, device               :: count_gpu(:)
+    integer                                 :: count_sum, counts
+    real                                    :: pi_cpu
+    real                                    :: pi_gpu
+    real                                    :: pi_gpu_res
+
+    grid = dim3((NUM_ITER+BLOCK_SIZE-1)/BLOCK_SIZE,1,1)
+    block = dim3(BLOCK_SIZE,1,1)
+    
+    counts = 10  ! Number of counts per GPU thread
+
+    print *, "Grid size is: ",(NUM_ITER/counts+BLOCK_SIZE-1)/BLOCK_SIZE
+    
+    allocate(rando(2*NUM_ITER),d_rando(2*NUM_ITER),count_gpu(NUM_ITER))
+
+    call curandCreateGenerator(gen,CURAND_RNG_PSEUDO_DEFAULT)
+    call curandSetPseudoRandomGeneratorSeed(gen, seed)
+
+    call curandGenerateUniform(gen, d_rando, 2*NUM_ITER)
+    
+    rando = d_rando
+    
+    call cpu_time(start)
+    call cpu_pi(NUM_ITER, rando, pi_cpu)
+    call cpu_time(finish)
+    print '("CPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    count_gpu = 0.0
+    
+    call cpu_time(start)
+    call gpu_pi<<<grid,block>>>(NUM_ITER, d_rando, count_gpu, counts)
+    count_sum = sum(count_gpu)
+    pi_gpu = 4.0*real(count_sum)/real(NUM_ITER)
+    call cpu_time(finish)
+    print '("GPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    print *, "PI CPU: ", pi_cpu ," PI GPU: ", pi_gpu
+    
+    call curandDestroyGenerator(gen)
+    
+    deallocate(rando, d_rando, count_gpu)
+        
+end program assignment2_bonus
