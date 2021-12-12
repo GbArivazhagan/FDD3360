@@ -1,0 +1,227 @@
+module particle_def
+contains
+
+subroutine cpu_velocity_update(np, t, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, t
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, np
+      P(i)%velocity%u = 0.00001*t - 0.0005*P(i)%position%x
+      P(i)%velocity%v = 0.00001*t - 0.0002*P(i)%position%x*P(i)%position%y
+      P(i)%velocity%w = 0.00001*t - 0.0001*P(i)%position%x*P(i)%position%z
+    end do
+end subroutine cpu_velocity_update
+
+subroutine cpu_position_update(np, dt, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, dt
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, np
+      P(i)%position%x = P(i)%position%x + dt*P(i)%velocity%u
+      P(i)%position%y = P(i)%position%y + dt*P(i)%velocity%v
+      P(i)%position%z = P(i)%position%z + dt*P(i)%velocity%w
+    end do
+end subroutine cpu_position_update
+
+subroutine cpu_particle(np, nt, dt, P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in)           :: np, nt, dt
+    type(Particle), intent(inout) :: P(:)
+    integer                       :: i
+    
+    do i = 1, nt
+        call cpu_velocity_update(np, i*dt, P)
+        call cpu_position_update(np, dt, P)
+    end do
+
+end subroutine cpu_particle
+
+attributes(device) subroutine gpu_velocity_update(np, t, X)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, t
+    type(Particle), intent(inout) :: X
+    
+    X%velocity%u = 0.00001*t - 0.0005*X%position%x
+    X%velocity%v = 0.00001*t - 0.0002*X%position%x*X%position%y
+    X%velocity%w = 0.00001*t - 0.0001*X%position%x*X%position%z
+    
+end subroutine gpu_velocity_update
+
+attributes(device) subroutine gpu_position_update(np, dt, X)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, dt
+    type(Particle), intent(inout) :: X
+    
+    X%position%x = X%position%x + dt*X%velocity%u
+    X%position%y = X%position%y + dt*X%velocity%v
+    X%position%z = X%position%z + dt*X%velocity%w
+
+end subroutine gpu_position_update
+
+attributes(global) subroutine gpu_particle(np, i, dt, d_P)
+    implicit none
+    type Position
+      real :: x, y, z
+    end type Position
+
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    integer, intent(in), value    :: np, i, dt
+    type(Particle), intent(inout) :: d_P(:)
+    integer, value                :: j
+    
+    j = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    
+    if (j <= np) then
+        call gpu_velocity_update(np, i*dt, d_P(j))
+        call gpu_position_update(np, dt, d_P(j))
+    end if
+
+end subroutine gpu_particle
+
+end module particle_def
+
+program assignment_3_2b
+    use particle_def
+    use cudafor
+    implicit none
+    
+    type Position
+      real :: x, y, z
+    end type Position
+    
+    type Velocity
+      real :: u, v, w
+    end type Velocity
+    
+    type Particle
+      type(Position) :: position
+      type(Velocity) :: velocity
+    end type Particle
+    
+    type(dim3)                           :: grid, block
+    real                                 :: start, finish
+    integer                              :: i, t, dt
+    integer, parameter                   :: BLOCK_SIZE = 256
+    integer, parameter                   :: NUM_PARTICLES = 100000
+    integer, parameter                   :: NUM_ITERATIONS = 10000
+    type(Particle), allocatable, managed :: P(:)
+    type(Particle), allocatable          :: cpu_P(:)
+    integer                              :: istat
+
+    grid = dim3((NUM_PARTICLES+BLOCK_SIZE-1)/BLOCK_SIZE,1,1)
+    block = dim3(BLOCK_SIZE,1,1)
+
+    print *, "Grid size is: ",(NUM_PARTICLES+BLOCK_SIZE-1)/BLOCK_SIZE
+    
+    t = 0
+    dt = 1
+
+    allocate(P(NUM_PARTICLES))
+    allocate(cpu_P(NUM_PARTICLES))
+
+    do i = 1, NUM_PARTICLES
+      P(i)%position%x = i*0.001
+      P(i)%position%y = (i**2 - 2*i)*0.001
+      P(i)%position%z = 0.00005*(i**2 + 3*i)
+    end do
+    
+    cpu_P = P
+    
+    call cpu_time(start)
+    call cpu_particle(NUM_PARTICLES, NUM_ITERATIONS, dt, cpu_P)
+    call cpu_time(finish)
+    print '("CPU Execution time = ",f9.6," seconds.")',finish-start
+    
+    call cpu_time(start)
+    do i = 1, NUM_ITERATIONS
+      call gpu_particle<<<grid,block>>>(NUM_PARTICLES, i, dt, P)
+      istat = cudaDeviceSynchronize()
+    end do
+    call cpu_time(finish)
+    print '("GPU Execution time = ",f9.6," seconds.")',finish-start
+
+! Check result of a particle's position
+    print *, "CPU result: ", cpu_P(5)%position%x
+    print *, "GPU result: ", P(5)%position%x
+    
+    deallocate(P)
+    deallocate(cpu_P)
+
+end program assignment_3_2b

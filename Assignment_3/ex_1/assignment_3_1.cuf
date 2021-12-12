@@ -1,0 +1,307 @@
+module CUDAKernels
+contains
+    !
+    ! Converts a given 24bpp image into 8bpp grayscale using the GPU.
+    !
+    attributes(global) subroutine gpu_grayscale(width, height, image, image_out)
+        implicit none
+    
+    real, dimension(:), intent(in) :: image
+    real, dimension(:), intent(inout) :: image_out
+    integer, value :: width, height
+    integer :: i, j
+    integer :: r, c
+
+    c = (blockIdx%x - 1)*blockDim%x + threadIdx%x
+    r = (blockIdx%y - 1)*blockDim%y + threadIdx%y
+
+    i = (r-1)*width + c
+    j = (r-1)*width*3 + c*3 - 2
+
+    if ((i <= width*height) .and. (j <= width*height*3)) then
+        image_out(i) = 0.0722*image(j) + 0.7152*image(j+1) + 0.2126*image(j+2)
+    end if
+
+    end subroutine gpu_grayscale
+    
+    !
+    ! Applies a 3x3 convolution matrix to a pixel using the CPU.
+    !
+    attributes(host) subroutine cpu_applyFilter(image, offset_t, stride, matrix, filter_dim, pixel_out)
+        implicit none
+        real, intent(in)  :: image(:)
+        integer, value    :: offset_t
+        integer, value    :: stride
+        real, intent(in)  :: matrix(:)
+        integer, value    :: filter_dim
+        real, intent(out) :: pixel_out
+        integer           :: h
+        integer           :: w
+        integer           :: offset
+        integer           :: offset_kernel
+        
+        pixel_out = 0.0
+        
+        do h=1,filter_dim
+            offset        = offset_t + (h - 1) * stride
+            offset_kernel = (h - 1) * filter_dim
+            
+            do w=1,filter_dim
+                pixel_out = pixel_out + image(offset + w) * matrix(offset_kernel + w)
+            end do
+        end do
+    end subroutine cpu_applyFilter
+    
+    !
+    ! Applies a 3x3 convolution matrix to a pixel using the GPU.
+    !
+    attributes(device) subroutine gpu_applyFilter(sh_block, stride, matrix, filter_dim, pixel_out)
+        implicit none
+        real, intent(in)  :: sh_block(:)
+        integer, value    :: offset_t
+        integer, value    :: stride
+        real, intent(in)  :: matrix(:)
+        integer, value    :: filter_dim
+        real, intent(out) :: pixel_out
+        integer, value :: h, w, offset, offset_kernel
+
+        pixel_out = 0.0
+
+        pixel_out = pixel_out + sh_block(threadIdx%x + 1 + threadIdx%y*stride)*matrix(5) &
+                              + sh_block(threadIdx%x + threadIdx%y*stride)*matrix(4) &
+                              + sh_block(threadIdx%x + 2 + threadIdx%y*stride)*matrix(6) &
+                              + sh_block(threadIdx%x + 1 + (threadIdx%y-1)*stride)*matrix(2) &
+                              + sh_block(threadIdx%x + (threadIdx%y-1)*stride)*matrix(1) &
+                              + sh_block(threadIdx%x + 2 + (threadIdx%y-1)*stride)*matrix(3) &
+                              + sh_block(threadIdx%x + 1 + (threadIdx%y+1)*stride)*matrix(8) &
+                              + sh_block(threadIdx%x + (threadIdx%y+1)*stride)*matrix(7) &
+                              + sh_block(threadIdx%x + 2 + (threadIdx%y+1)*stride)*matrix(9)
+
+    end subroutine gpu_applyFilter
+
+    !
+    ! Applies a Gaussian 3x3 filter to a given image using the GPU.
+    !
+    attributes(global) subroutine gpu_gaussian(width, height, image, image_out)
+        implicit none
+        integer, value     :: width
+        integer, value     :: height
+        real, intent(in)   :: image(:)
+        real, intent(out)  :: image_out(:)
+        real, dimension(9) :: gaussian
+        integer            :: index_x
+        integer            :: index_y
+        integer            :: offset_t
+        integer            :: offset
+        real, shared, dimension(18*18) :: sh_block
+        integer, value :: sh_dim
+        sh_dim = 18
+ 
+        gaussian = (/ (1.0 / 16.0), (2.0 / 16.0), (1.0 / 16.0), &
+                      (2.0 / 16.0), (4.0 / 16.0), (2.0 / 16.0), &
+                      (1.0 / 16.0), (2.0 / 16.0), (1.0 / 16.0) /)
+        
+        index_x = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        index_y = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if ((index_x <= width) .and. (index_y <= height)) then
+            sh_block(threadIdx%y*sh_dim + threadIdx%x + 1) = image((index_y-1)*width + index_x)
+! Top
+           if ((threadIdx%y == 1) .and. (blockIdx%y /= 1)) then
+             sh_block(threadIdx%x + 1) = image((index_y-2)*width + index_x)
+           end if
+! Bottom --
+           if ((threadIdx%y == blockDim%y) .and. (blockIdx%y /= blockDim%y)) then
+             sh_block((threadIdx%y+1)*sh_dim + threadIdx%x + 1) = image(index_y*width + index_x)
+           end if
+! R and L
+           if ((threadIdx%x == blockDim%x) .and. (blockIdx%x /= gridDim%x)) then
+             sh_block((threadIdx%y+1)*sh_dim) = image((index_y-1)*width + index_x + 1)
+           end if
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1)) then
+             sh_block(threadIdx%y*sh_dim + 1) = image((index_y-1)*width + index_x - 1)
+           end if
+
+! NW
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1) .and. (threadIdx%y == 1)) then
+             sh_block(1) = image((index_y-2)*width + index_x - 1)
+           end if
+! SW
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1) .and. (threadIdx%y == blockDim%y)) then
+             sh_block((sh_dim-1)*sh_dim + 1) = image(index_y*width + index_x - 1)
+           end if
+! SE
+           if ((blockIdx%x /= gridDim%x) .and. (threadIdx%x == blockDim%x) .and. (threadIdx%y == blockDim%y))  then
+             sh_block(sh_dim*sh_dim) = image(index_y*width + index_x + 1)
+           end if
+! NE
+           if ((blockIdx%x /= gridDim%x) .and. (threadIdx%x == blockDim%x) .and. (threadIdx%y == 1)) then
+             sh_block(sh_dim) = image((index_y-2)*width + index_x + 1)
+           end if
+        end if
+
+
+        call syncthreads()
+        
+        if ((index_x > 1) .and. (index_x < width) .and. (index_y > 1) .and. (index_y < height)) then
+            offset   = (index_y-1) * width + index_x
+            
+            call gpu_applyFilter(sh_block, sh_dim, gaussian, 3, image_out(offset))
+!        else if ((index_x == 1) .or. (index_y == 1) .or. (index_x == width) .or. (index_y == height)) then
+!            image_out((index_y-1)*width+index_x) = image((index_y-1)*width+index_x)
+        end if
+
+    end subroutine gpu_gaussian
+
+    !
+    ! Calculates the gradient of an image using a Sobel filter on the GPU.
+    !
+    attributes(global) subroutine gpu_sobel(width, height, image, image_out)
+        implicit none
+
+    integer, value :: width, height
+    real, intent(in) :: image(:)
+    real, intent(out) :: image_out(:)
+    real :: image_sobel_x, image_sobel_y
+    real, dimension(9) :: sobel_x, sobel_y
+    integer, value :: index_x, index_y, offset, offset_t
+    real, shared, dimension(18*18) :: sh_block
+    integer, value :: sh_dim
+    sh_dim = 18
+
+
+    sobel_x = (/ 1.0, 0.0, -1.0, 2.0, 0.0, -2.0, 1.0, 0.0, -1.0 /)
+    sobel_y = (/ 1.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, -2.0, -1.0 /)
+
+        index_x = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+        index_y = (blockIdx%y - 1) * blockDim%y + threadIdx%y
+
+        if ((index_x <= width) .and. (index_y <= height)) then
+            sh_block(threadIdx%y*sh_dim + threadIdx%x + 1) = image((index_y-1)*width + index_x)
+! Top
+           if ((threadIdx%y == 1) .and. (blockIdx%y /= 1)) then
+             sh_block(threadIdx%x + 1) = image((index_y-2)*width + index_x)
+           end if
+! Bottom --
+           if ((threadIdx%y == blockDim%y) .and. (blockIdx%y /= blockDim%y)) then
+             sh_block((threadIdx%y+1)*sh_dim + threadIdx%x + 1) = image(index_y*width + index_x)
+           end if
+! R and L
+           if ((threadIdx%x == blockDim%x) .and. (blockIdx%x /= gridDim%x)) then
+             sh_block((threadIdx%y+1)*sh_dim) = image((index_y-1)*width + index_x + 1)
+           end if
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1)) then
+             sh_block(threadIdx%y*sh_dim + 1) = image((index_y-1)*width + index_x - 1)
+           end if
+! NW
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1) .and. (threadIdx%y == 1)) then
+             sh_block(1) = image((index_y-2)*width + index_x - 1)
+           end if
+! SW
+           if ((blockIdx%x /= 1) .and. (threadIdx%x == 1) .and. (threadIdx%y == blockDim%y)) then
+             sh_block((sh_dim-1)*sh_dim + 1) = image(index_y*width + index_x - 1)
+           end if
+! SE
+           if ((blockIdx%x /= gridDim%x) .and. (threadIdx%x == blockDim%x) .and. (threadIdx%y == blockDim%y))  then
+             sh_block(sh_dim*sh_dim) = image(index_y*width + index_x + 1)
+           end if
+! NE
+           if ((blockIdx%x /= gridDim%x) .and. (threadIdx%x == blockDim%x) .and. (threadIdx%y == 1)) then
+             sh_block(sh_dim) = image((index_y-2)*width + index_x + 1)
+           end if
+        end if
+
+        call syncthreads()
+
+
+        if ((index_x >  1) .and. (index_x < width) .and. (index_y > 1) .and. (index_y < height)) then
+            offset   = (index_y-1) * width + index_x
+
+            call gpu_applyFilter(sh_block, sh_dim, sobel_x, 3, image_sobel_x)
+            call gpu_applyFilter(sh_block, sh_dim, sobel_y, 3, image_sobel_y)
+            image_out(offset) = sqrt(image_sobel_x*image_sobel_x &
+                                + image_sobel_y*image_sobel_y)
+        end if
+    end subroutine gpu_sobel
+end module CUDAKernels
+
+program assignment_3_1
+    use CUDAKernels
+    use cudafor
+    implicit none
+    integer, parameter        :: BLOCK_SIZE   = 16
+    integer, parameter        :: IMAGE_WIDTH  = 4608 ! Fixed image width
+    integer, parameter        :: IMAGE_HEIGHT = 2880 ! Fixed image height
+    integer, parameter        :: NUM_BLOCKS_X = ((IMAGE_WIDTH  + (BLOCK_SIZE - 1)) / BLOCK_SIZE)
+    integer, parameter        :: NUM_BLOCKS_Y = ((IMAGE_HEIGHT  + (BLOCK_SIZE - 1)) / BLOCK_SIZE)
+    real, allocatable         :: bitmap(:)
+    real, allocatable, device :: d_bitmap(:)
+    real, allocatable         :: image_out_1(:)
+    real, allocatable         :: image_out_2(:)
+    real, allocatable, device :: d_image_out_1(:)
+    real, allocatable, device :: d_image_out_2(:)
+    integer                   :: image_size
+    integer                   :: elapsed_cpu
+    integer                   :: elapsed_gpu
+    integer                   :: hr
+    type(dim3) :: grid
+    type(dim3) :: block
+    
+    ! Read the input image and update the grid dimension
+    allocate(bitmap(IMAGE_WIDTH * IMAGE_HEIGHT * 3));
+    call c_readbmp(bitmap)
+    
+    image_size = IMAGE_WIDTH * IMAGE_HEIGHT;
+    grid       = dim3(NUM_BLOCKS_X, NUM_BLOCKS_Y, 1)
+    block      = dim3(BLOCK_SIZE, BLOCK_SIZE, 1)
+    
+    ! Allocate the intermediate image buffers for each step
+    allocate(image_out_1(image_size))
+    allocate(image_out_2(image_size))
+    hr = cudaMalloc(d_image_out_1, image_size);
+    hr = cudaMalloc(d_image_out_2, image_size);
+    
+    hr = cudaMalloc(d_bitmap, image_size * 3);
+    hr = cudaMemcpy(d_bitmap, bitmap, image_size * 3)
+    
+    ! Step 1: Convert to grayscale
+    
+        call c_step1_begin(bitmap, image_out_1)
+        
+        call gpu_grayscale<<<grid, block>>>(IMAGE_WIDTH, IMAGE_HEIGHT, d_bitmap, d_image_out_1)
+        
+        hr = cudaMemcpy(image_out_1, d_image_out_1, image_size)
+        
+        call c_step1_end(image_out_1)
+    
+    ! Step 2: Apply a 3x3 Gaussian filter
+    
+        call c_step2_begin(image_out_1, image_out_2)
+        
+        call gpu_gaussian<<<grid, block>>>(IMAGE_WIDTH, IMAGE_HEIGHT, d_image_out_1, d_image_out_2)
+
+        hr = cudaMemcpy(image_out_2, d_image_out_2, image_size)
+        
+        call c_step2_end(image_out_2)
+    
+    ! Step 3: Apply a Sobel filter
+
+        call c_step3_begin(image_out_2, image_out_1)
+        
+        call gpu_sobel<<<grid, block>>>(IMAGE_WIDTH, IMAGE_HEIGHT, d_image_out_2, d_image_out_1)
+        
+        hr = cudaMemcpy(image_out_1, d_image_out_1, image_size)
+        
+        call c_step3_end(image_out_1)
+    
+    ! Release the allocated memory
+    deallocate(image_out_1)
+    deallocate(image_out_2)
+    hr = cudaFree(d_image_out_1)
+    hr = cudaFree(d_image_out_2)
+    
+    deallocate(bitmap)
+    hr = cudaFree(d_bitmap)
+    
+    call c_freebmp()
+end program assignment_3_1
