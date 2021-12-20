@@ -11,3 +11,8 @@ to load the PGI compiler.
 
 To compile the cudaFortran code:
 **pgfortran -Mcuda=cc3x cuda_file.cuf -o cuda_file.out**
+
+
+Update: Only Assignment 3 - exercise 3 and bonus exercise features cudaC code.
+This is because of the asynchronous copy of derived data type where, in cudaFortran the datatype has to be generic.
+As a temporary fix, switched to cudaC in only those exercises. A better solution should be available and shall be updated, when possible.
